@@ -29,6 +29,7 @@ module AMQP10::Protocol
     PROPERTIES             = 0x73_u64
     APPLICATION_PROPERTIES = 0x74_u64
     DATA                   = 0x75_u64
+    AMQP_SEQUENCE          = 0x76_u64
     AMQP_VALUE             = 0x77_u64
     FOOTER                 = 0x78_u64
   end
