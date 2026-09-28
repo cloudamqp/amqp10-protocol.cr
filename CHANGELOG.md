@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `TransferCodec::DispositionView` exposes the fields of a modified outcome: `delivery_failed`, `undeliverable_here` and `message_annotations`
 
+### Fixed
+
+- `Codec.skip_value` skips `short` (0x61) values instead of raising, which rejected any message containing one
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

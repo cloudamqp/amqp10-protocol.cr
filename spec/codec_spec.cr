@@ -116,6 +116,25 @@ describe AMQP10::Protocol::Codec do
     reader.pos.should eq reader.bytesize
   end
 
+  it "skips every fixed-width type" do
+    widths = {
+      0x40 => 0, 0x41 => 0, 0x42 => 0, 0x43 => 0, 0x44 => 0, 0x45 => 0,
+      0x50 => 1, 0x51 => 1, 0x52 => 1, 0x53 => 1, 0x54 => 1, 0x55 => 1, 0x56 => 1,
+      0x60 => 2, 0x61 => 2,
+      0x70 => 4, 0x71 => 4, 0x72 => 4, 0x73 => 4, 0x74 => 4,
+      0x80 => 8, 0x81 => 8, 0x82 => 8, 0x83 => 8, 0x84 => 8,
+      0x94 => 16, 0x98 => 16,
+    }
+    widths.each do |code, width|
+      bytes = Bytes.new(1 + width + 1)
+      bytes[0] = code.to_u8
+      bytes[-1] = 0x40_u8 # a null after the value
+      reader = IO::Memory.new(bytes)
+      AMQP10::Protocol::Codec.skip_value(reader)
+      reader.pos.should eq 1 + width
+    end
+  end
+
   it "reads list and map headers and validates them against the payload" do
     io = IO::Memory.new
     AMQP10::Protocol::Codec.write_value(io, AMQP10::Protocol::Value.list([AMQP10::Protocol::Value.bool(true), AMQP10::Protocol::Value.null]))
