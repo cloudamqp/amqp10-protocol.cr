@@ -147,6 +147,42 @@ describe AMQP10::Protocol::TransferCodec do
     flow.available.should be_nil
   end
 
+  it "decodes the fields of a modified outcome" do
+    annotations = AMQP10::Protocol::Value.map([
+      {AMQP10::Protocol::Value.symbol("x-opt-reason"), AMQP10::Protocol::Value.string("offline")},
+    ])
+    encoded_annotations = IO::Memory.new
+    AMQP10::Protocol::Codec.write_value(encoded_annotations, annotations)
+    modified = AMQP10::Protocol::Value.described(AMQP10::Protocol::Value.ulong(AMQP10::Protocol::Descriptor::MODIFIED),
+      AMQP10::Protocol::Value.list([AMQP10::Protocol::Value.bool(true), AMQP10::Protocol::Value.bool(false), annotations]))
+    fields = [AMQP10::Protocol::Value.bool(true), AMQP10::Protocol::Value.uint(5_u32), AMQP10::Protocol::Value.null,
+              AMQP10::Protocol::Value.bool(true), modified]
+    payload = IO::Memory.new
+    AMQP10::Protocol::Codec.write_described_list(payload, AMQP10::Protocol::Descriptor::DISPOSITION, fields)
+
+    disposition = AMQP10::Protocol::TransferCodec.read_disposition(IO::Memory.new(payload.to_slice))
+
+    disposition.outcome.should eq AMQP10::Protocol::Outcome::Modified
+    disposition.delivery_failed.should be_true
+    disposition.undeliverable_here.should be_false
+    disposition.message_annotations.should eq encoded_annotations.to_slice
+  end
+
+  it "decodes a modified outcome without fields" do
+    modified = AMQP10::Protocol::Value.described(AMQP10::Protocol::Value.ulong(AMQP10::Protocol::Descriptor::MODIFIED),
+      AMQP10::Protocol::Value.list(Array(AMQP10::Protocol::Value).new))
+    fields = [AMQP10::Protocol::Value.bool(true), AMQP10::Protocol::Value.uint(5_u32), AMQP10::Protocol::Value.null,
+              AMQP10::Protocol::Value.bool(true), modified]
+    payload = IO::Memory.new
+    AMQP10::Protocol::Codec.write_described_list(payload, AMQP10::Protocol::Descriptor::DISPOSITION, fields)
+
+    disposition = AMQP10::Protocol::TransferCodec.read_disposition(IO::Memory.new(payload.to_slice))
+
+    disposition.outcome.should eq AMQP10::Protocol::Outcome::Modified
+    disposition.delivery_failed.should be_false
+    disposition.message_annotations.should be_nil
+  end
+
   it "round-trips every outcome through a disposition" do
     AMQP10::Protocol::Outcome.each do |outcome|
       io = IO::Memory.new

@@ -17,13 +17,20 @@ module AMQP10::Protocol
       more : Bool,
       aborted : Bool
 
+    # For a modified outcome, delivery_failed, undeliverable_here and
+    # message_annotations carry its fields; message_annotations is the
+    # encoded annotations map (nil when absent or empty), a view into the
+    # frame buffer.
     record DispositionView,
       role : Role,
       first : UInt32,
       last : UInt32?,
       settled : Bool,
       outcome : Outcome?,
-      state_present : Bool
+      state_present : Bool,
+      delivery_failed : Bool = false,
+      undeliverable_here : Bool = false,
+      message_annotations : Bytes? = nil
 
     # ameba:disable Metrics/CyclomaticComplexity
     def read_transfer(reader : IO::Memory) : TransferView
@@ -79,6 +86,7 @@ module AMQP10::Protocol
       settled = false
       outcome = nil
       state_present = false
+      modified = nil
 
       index = 0
       while index < count
@@ -92,7 +100,7 @@ module AMQP10::Protocol
         when 3
           settled = read_optional_bool(reader) || false
         when 4
-          state_present, outcome = read_state(reader)
+          state_present, outcome, modified = read_state(reader)
         else
           Codec.skip_value(reader)
         end
@@ -103,7 +111,11 @@ module AMQP10::Protocol
       first_value = first
       raise DecodeError.new("disposition missing role") unless role_value
       raise DecodeError.new("disposition missing first") unless first_value
-      DispositionView.new(role_value, first_value, last, settled, outcome, state_present)
+      if modified
+        DispositionView.new(role_value, first_value, last, settled, outcome, state_present, *modified)
+      else
+        DispositionView.new(role_value, first_value, last, settled, outcome, state_present)
+      end
     rescue ex : IO::EOFError
       raise DecodeError.new("truncated AMQP 1.0 disposition", cause: ex)
     end
@@ -149,8 +161,8 @@ module AMQP10::Protocol
     # and, if it was a recognized terminal outcome, which one. A non-terminal
     # state (e.g. received) reports present=true with a nil outcome so the
     # caller does not mistake it for acceptance.
-    private def read_state(reader) : Tuple(Bool, Outcome?)
-      return {false, nil} if peek_null(reader)
+    private def read_state(reader) : Tuple(Bool, Outcome?, Tuple(Bool, Bool, Bytes?)?)
+      return {false, nil, nil} if peek_null(reader)
       descriptor = Codec.read_descriptor_code(reader)
       outcome = case descriptor
                 when Descriptor::ACCEPTED then Outcome::Accepted
@@ -158,8 +170,39 @@ module AMQP10::Protocol
                 when Descriptor::REJECTED then Outcome::Rejected
                 when Descriptor::MODIFIED then Outcome::Modified
                 end
+      return {true, outcome, read_modified(reader)} if outcome.try(&.modified?)
       Codec.skip_value(reader)
-      {true, outcome}
+      {true, outcome, nil}
+    end
+
+    # The fields of a modified outcome: delivery-failed, undeliverable-here
+    # and message-annotations.
+    private def read_modified(reader) : Tuple(Bool, Bool, Bytes?)
+      delivery_failed = false
+      undeliverable_here = false
+      annotations = nil
+      count, end_pos = Codec.read_list_header(reader)
+      index = 0
+      while index < count
+        case index
+        when 0 then delivery_failed = read_optional_bool(reader) || false
+        when 1 then undeliverable_here = read_optional_bool(reader) || false
+        when 2 then annotations = read_optional_map(reader)
+        else        Codec.skip_value(reader)
+        end
+        index += 1
+      end
+      reader.skip(end_pos - reader.pos) if reader.pos < end_pos
+      {delivery_failed, undeliverable_here, annotations}
+    end
+
+    # An encoded map as a view into the buffer, nil when null or empty.
+    private def read_optional_map(reader) : Bytes?
+      return if peek_null(reader)
+      start = reader.pos
+      map_count, map_end = Codec.read_map_header(reader)
+      reader.pos = map_end
+      Codec.slice_from(reader, start) unless map_count.zero?
     end
 
     # Returns the number of bytes written.
