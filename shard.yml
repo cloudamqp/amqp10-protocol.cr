@@ -1,0 +1,12 @@
+name: amqp10-protocol
+version: 0.1.0
+
+authors:
+  - Carl Hörberg <carl@cloudamqp.com>
+
+description: |
+  AMQP 1.0 protocol library
+
+crystal: 1.20.0
+
+license: MIT
