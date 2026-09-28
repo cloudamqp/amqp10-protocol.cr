@@ -657,11 +657,25 @@ module AMQP10::Protocol
       skip_value_payload(reader, read_byte(reader))
     end
 
+    # Described values are skipped iteratively: a descriptor can itself be a
+    # described value, nested without bound in untrusted input, so recursing
+    # would let a crafted value exhaust the stack.
     def skip_value_payload(reader : IO::Memory, code : UInt8) : Nil
+      pending = 1 # values left to skip, the one `code` starts included
+      loop do
+        if code == 0x00
+          pending += 1 # replaced by its descriptor and its value
+        else
+          skip_undescribed_payload(reader, code)
+          pending -= 1
+          break if pending.zero?
+        end
+        code = read_byte(reader)
+      end
+    end
+
+    private def skip_undescribed_payload(reader : IO::Memory, code : UInt8) : Nil
       case code
-      when 0x00
-        skip_value(reader)
-        skip_value(reader)
       when 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
       when 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56
         reader.skip(1)

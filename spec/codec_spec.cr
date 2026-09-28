@@ -135,6 +135,23 @@ describe AMQP10::Protocol::Codec do
     end
   end
 
+  it "skips described values nested far deeper than the stack could recurse" do
+    depth = 1_000_000
+    io = IO::Memory.new
+    # Each descriptor is itself a described value: 0x00 0x00 ... then the
+    # innermost descriptor and every value, all nulls.
+    depth.times { io.write_byte 0x00_u8 }
+    (depth + 1).times { io.write_byte 0x40_u8 }
+    io.write_byte 0x41_u8 # a true after the value
+    reader = IO::Memory.new(io.to_slice)
+    AMQP10::Protocol::Codec.skip_value(reader)
+    reader.pos.should eq reader.bytesize - 1
+
+    expect_raises(IO::EOFError) do
+      AMQP10::Protocol::Codec.skip_value(IO::Memory.new(Bytes[0x00, 0x00, 0x40]))
+    end
+  end
+
   it "reads list and map headers and validates them against the payload" do
     io = IO::Memory.new
     AMQP10::Protocol::Codec.write_value(io, AMQP10::Protocol::Value.list([AMQP10::Protocol::Value.bool(true), AMQP10::Protocol::Value.null]))
