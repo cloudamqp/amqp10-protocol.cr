@@ -14,6 +14,11 @@ module AMQP10::Protocol
 
   class FrameReader
     @header = Bytes.new(8)
+    # Progress through the frame being read, kept when the IO raises partway
+    # (e.g. IO::TimeoutError from a read timeout used for idle checks) so the
+    # next read carries on instead of taking the rest for a new frame.
+    @header_read = 0
+    @body_read = 0
     @buffer : Bytes
     @reader = IO::Memory.new(Bytes.empty)
     # Largest frame accepted, header included; never more than the buffer holds.
@@ -40,8 +45,14 @@ module AMQP10::Protocol
       @max_frame_size = Math.min(size, @buffer.bytesize.to_u32)
     end
 
+    # Resumable: when the IO raises partway through a frame, calling read
+    # again continues that frame with the bytes already read.
     def read : Frame
-      @io.read_fully(@header)
+      while @header_read < 8
+        count = @io.read(@header + @header_read)
+        raise IO::EOFError.new if count.zero?
+        @header_read += count
+      end
       size = IO::ByteFormat::NetworkEndian.decode(UInt32, @header[0, 4])
       doff = @header[4]
       type = @header[5]
@@ -51,7 +62,12 @@ module AMQP10::Protocol
       raise DecodeError.new("AMQP 1.0 frame too large #{size}") if size > @max_frame_size
       remaining = size - 8
       slice = @buffer[0, remaining]
-      @io.read_fully(slice)
+      while @body_read < remaining
+        count = @io.read(slice + @body_read)
+        raise IO::EOFError.new if count.zero?
+        @body_read += count
+      end
+      @header_read = @body_read = 0
       ext_size = doff.to_i * 4 - 8
       Frame.new(type, channel, slice[ext_size, remaining - ext_size], @reader)
     end

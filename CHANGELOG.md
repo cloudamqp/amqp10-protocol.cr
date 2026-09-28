@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Codec.skip_value` skips `short` (0x61) values instead of raising, which rejected any message containing one
 - `Codec.skip_value` skips described values iteratively, so deeply nested descriptors in untrusted input can no longer overflow the stack
+- `FrameReader#read` keeps a partly read frame when the IO raises, e.g. on a read timeout, and carries on with it on the next call instead of misreading the rest as a new frame
 
 ## [0.1.0] - 2026-09-28
 

@@ -12,6 +12,32 @@ private def frame_bytes(type : UInt8, channel : UInt16, body : Bytes, doff : UIn
   io.to_slice
 end
 
+# Hands out the bytes a few at a time, timing out before every chunk after
+# the first, like a socket whose read timeout fires partway through a frame.
+private class TrickleIO < IO
+  def initialize(@bytes : Bytes, @chunk : Int32)
+    @pos = 0
+    @timed_out = true
+  end
+
+  def read(slice : Bytes) : Int32
+    return 0 if @pos >= @bytes.size
+    unless @timed_out
+      @timed_out = true
+      raise IO::TimeoutError.new("Read timed out")
+    end
+    @timed_out = false
+    count = Math.min(Math.min(slice.size, @chunk), @bytes.size - @pos)
+    slice.copy_from(@bytes[@pos, count].to_unsafe, count)
+    @pos += count
+    count
+  end
+
+  def write(slice : Bytes) : Nil
+    raise NotImplementedError.new("write")
+  end
+end
+
 describe AMQP10::Protocol::FrameReader do
   it "reads consecutive frames, skipping the extended header" do
     io = IO::Memory.new
@@ -32,6 +58,26 @@ describe AMQP10::Protocol::FrameReader do
     frame.body.should eq Bytes[4]
 
     reader.read.body.empty?.should be_true
+  end
+
+  it "carries on with a partly read frame after the IO times out" do
+    io = IO::Memory.new
+    io.write frame_bytes(AMQP10::Protocol::AMQP_FRAME_TYPE, 3_u16, Bytes[1, 2, 3, 4, 5, 6, 7])
+    io.write frame_bytes(AMQP10::Protocol::AMQP_FRAME_TYPE, 4_u16, Bytes[8, 9])
+    reader = AMQP10::Protocol::FrameReader.new(TrickleIO.new(io.to_slice, 3), 1024_u32)
+
+    frames = [] of Tuple(UInt16, Bytes)
+    timeouts = 0
+    while frames.size < 2
+      begin
+        frame = reader.read
+        frames << {frame.channel, frame.body.dup}
+      rescue IO::TimeoutError
+        timeouts += 1
+      end
+    end
+    frames.should eq [{3_u16, Bytes[1, 2, 3, 4, 5, 6, 7]}, {4_u16, Bytes[8, 9]}]
+    timeouts.should be > 2
   end
 
   it "never accepts less than the minimum max-frame-size" do
