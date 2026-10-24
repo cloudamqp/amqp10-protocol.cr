@@ -147,6 +147,69 @@ describe AMQP10::Protocol::TransferCodec do
     flow.available.should be_nil
   end
 
+  it "reads a flow the same as Flow.from_value does" do
+    io = IO::Memory.new
+    AMQP10::Protocol::TransferCodec.write_flow(io, 0_u16, 1_u32, 2_u32, 3_u32, 4_u32, 5_u32, 6_u32, 7_u32, drain: true)
+    body = io.to_slice[8, io.size - 8]
+
+    flow = AMQP10::Protocol::TransferCodec.read_flow(IO::Memory.new(body))
+
+    flow.should eq AMQP10::Protocol::Flow.from_value(AMQP10::Protocol::Codec.decode(IO::Memory.new(body)))
+    flow.next_incoming_id.should eq 1_u32
+    flow.incoming_window.should eq 2_u32
+    flow.next_outgoing_id.should eq 3_u32
+    flow.outgoing_window.should eq 4_u32
+    flow.handle.should eq 5_u32
+    flow.delivery_count.should eq 6_u32
+    flow.link_credit.should eq 7_u32
+    flow.available.should be_nil
+    flow.drain.should be_true
+    flow.echo.should be_false
+  end
+
+  it "reads a session flow with echo and properties, leaving nothing behind" do
+    payload = IO::Memory.new
+    fields = [
+      AMQP10::Protocol::Value.null,
+      AMQP10::Protocol::Value.uint(100_u32),
+      AMQP10::Protocol::Value.uint(200_u32),
+      AMQP10::Protocol::Value.uint(300_u32),
+      AMQP10::Protocol::Value.null,
+      AMQP10::Protocol::Value.null,
+      AMQP10::Protocol::Value.null,
+      AMQP10::Protocol::Value.null,
+      AMQP10::Protocol::Value.null,
+      AMQP10::Protocol::Value.bool(true),
+      AMQP10::Protocol::Value.map([{AMQP10::Protocol::Value.symbol("k"), AMQP10::Protocol::Value.string("v")}]),
+    ]
+    AMQP10::Protocol::Codec.write_described_list(payload, AMQP10::Protocol::Descriptor::FLOW, fields)
+    reader = IO::Memory.new(payload.to_slice)
+
+    flow = AMQP10::Protocol::TransferCodec.read_flow(reader)
+
+    flow.next_incoming_id.should be_nil
+    flow.incoming_window.should eq 100_u32
+    flow.handle.should be_nil
+    flow.drain.should be_false
+    flow.echo.should be_true
+    reader.pos.should eq reader.bytesize
+  end
+
+  it "raises DecodeError for a flow that is not one or is truncated" do
+    payload = IO::Memory.new
+    AMQP10::Protocol::Codec.write_described_list(payload, AMQP10::Protocol::Descriptor::TRANSFER, [AMQP10::Protocol::Value.uint(1_u32)])
+    expect_raises(AMQP10::Protocol::DecodeError, "expected flow") do
+      AMQP10::Protocol::TransferCodec.read_flow(IO::Memory.new(payload.to_slice))
+    end
+
+    io = IO::Memory.new
+    AMQP10::Protocol::TransferCodec.write_flow(io, 0_u16, 1_u32, 2_u32, 3_u32, 4_u32)
+    truncated = io.to_slice[8, io.size - 8 - 2]
+    expect_raises(AMQP10::Protocol::DecodeError) do
+      AMQP10::Protocol::TransferCodec.read_flow(IO::Memory.new(truncated))
+    end
+  end
+
   it "decodes the fields of a modified outcome" do
     annotations = AMQP10::Protocol::Value.map([
       {AMQP10::Protocol::Value.symbol("x-opt-reason"), AMQP10::Protocol::Value.string("offline")},

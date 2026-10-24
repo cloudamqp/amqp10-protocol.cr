@@ -700,6 +700,27 @@ module AMQP10::Protocol
       end
     end
 
+    # Consumes a null if one is next, returning whether it did. Peeks rather
+    # than reading-then-rewinding, to keep the hot path free of a rewind.
+    def skip_null?(reader : IO::Memory) : Bool
+      # Null is a single byte and never followed by payload.
+      if reader.bytesize - reader.pos > 0 && reader.peek[0] == 0x40_u8
+        reader.skip(1)
+        true
+      else
+        false
+      end
+    end
+
+    # An encoded map as a view into the buffer, nil when null or empty.
+    def read_optional_map(reader : IO::Memory) : Bytes?
+      return if skip_null?(reader)
+      start = reader.pos
+      count, end_pos = read_map_header(reader)
+      reader.pos = end_pos
+      slice_from(reader, start) unless count.zero?
+    end
+
     def read_list_header(reader : IO::Memory) : Tuple(Int32, Int32)
       case code = read_byte(reader)
       when 0x45

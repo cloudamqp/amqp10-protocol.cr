@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TransferCodec.read_flow` decodes a flow into the `Flow` record without building a `Value` tree, like the transfer and disposition decoders
+- `Codec.read_optional_map` and `Codec.skip_null?` for reading an encoded map as a view into the buffer, as the disposition decoder does for a modified outcome's annotations
 - `TransferCodec::DispositionView` exposes the fields of a modified outcome: `delivery_failed`, `undeliverable_here` and `message_annotations`
 - `Descriptor::AMQP_SEQUENCE` for the amqp-sequence body section
 
