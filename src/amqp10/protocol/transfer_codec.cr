@@ -4,7 +4,8 @@ require "./performatives"
 
 module AMQP10::Protocol
   # Encoders and allocation-free decoders for the performatives on the
-  # per-message path: transfer, disposition and flow.
+  # per-message path: transfer, disposition and flow. The decoders read the
+  # fields straight off the frame buffer instead of building a `Value` tree.
   module TransferCodec
     extend self
 
@@ -120,8 +121,43 @@ module AMQP10::Protocol
       raise DecodeError.new("truncated AMQP 1.0 disposition", cause: ex)
     end
 
+    # Reads a flow as the `Flow` record, which `Flow.from_value` also returns.
+    # ameba:disable Metrics/CyclomaticComplexity
+    def read_flow(reader : IO::Memory) : Flow
+      descriptor = Codec.read_descriptor_code(reader)
+      raise DecodeError.new("expected flow") unless descriptor == Descriptor::FLOW
+      count, end_pos = Codec.read_list_header(reader)
+      next_incoming_id = incoming_window = next_outgoing_id = outgoing_window = nil
+      handle = delivery_count = link_credit = available = nil
+      drain = false
+      echo = false
+
+      index = 0
+      while index < count
+        case index
+        when 0 then next_incoming_id = read_optional_uint(reader, "flow next-incoming-id")
+        when 1 then incoming_window = read_optional_uint(reader, "flow incoming-window")
+        when 2 then next_outgoing_id = read_optional_uint(reader, "flow next-outgoing-id")
+        when 3 then outgoing_window = read_optional_uint(reader, "flow outgoing-window")
+        when 4 then handle = read_optional_uint(reader, "flow handle")
+        when 5 then delivery_count = read_optional_uint(reader, "flow delivery-count")
+        when 6 then link_credit = read_optional_uint(reader, "flow link-credit")
+        when 7 then available = read_optional_uint(reader, "flow available")
+        when 8 then drain = read_optional_bool(reader) || false
+        when 9 then echo = read_optional_bool(reader) || false
+        else        Codec.skip_value(reader)
+        end
+        index += 1
+      end
+      reader.skip(end_pos - reader.pos) if reader.pos < end_pos
+      Flow.new(next_incoming_id, incoming_window, next_outgoing_id, outgoing_window,
+        handle, delivery_count, link_credit, available, drain, echo)
+    rescue ex : IO::EOFError
+      raise DecodeError.new("truncated AMQP 1.0 flow", cause: ex)
+    end
+
     private def read_optional_uint(reader, field : String) : UInt32?
-      return if peek_null(reader)
+      return if Codec.skip_null?(reader)
       read_uint32_value(reader, field)
     end
 
@@ -134,27 +170,13 @@ module AMQP10::Protocol
     end
 
     private def read_optional_bool(reader) : Bool?
-      return if peek_null(reader)
+      return if Codec.skip_null?(reader)
       Codec.read_bool_value(reader)
     end
 
     private def read_optional_binary(reader) : Bytes?
-      return if peek_null(reader)
+      return if Codec.skip_null?(reader)
       Codec.read_binary_value(reader)
-    end
-
-    private def peek_null(reader) : Bool
-      # Peek without consuming, rather than reading-then-rewinding, to avoid
-      # complicating the hot path with a rewind.
-      if reader.bytesize - reader.pos > 0
-        # Null is a single byte and never followed by payload.
-        slice = reader.peek
-        if slice[0] == 0x40_u8
-          reader.skip(1)
-          return true
-        end
-      end
-      false
     end
 
     # Returns whether a delivery-state field was present (vs. a null placeholder)
@@ -162,7 +184,7 @@ module AMQP10::Protocol
     # state (e.g. received) reports present=true with a nil outcome so the
     # caller does not mistake it for acceptance.
     private def read_state(reader) : Tuple(Bool, Outcome?, Tuple(Bool, Bool, Bytes?)?)
-      return {false, nil, nil} if peek_null(reader)
+      return {false, nil, nil} if Codec.skip_null?(reader)
       descriptor = Codec.read_descriptor_code(reader)
       outcome = case descriptor
                 when Descriptor::ACCEPTED then Outcome::Accepted
@@ -187,22 +209,13 @@ module AMQP10::Protocol
         case index
         when 0 then delivery_failed = read_optional_bool(reader) || false
         when 1 then undeliverable_here = read_optional_bool(reader) || false
-        when 2 then annotations = read_optional_map(reader)
+        when 2 then annotations = Codec.read_optional_map(reader)
         else        Codec.skip_value(reader)
         end
         index += 1
       end
       reader.skip(end_pos - reader.pos) if reader.pos < end_pos
       {delivery_failed, undeliverable_here, annotations}
-    end
-
-    # An encoded map as a view into the buffer, nil when null or empty.
-    private def read_optional_map(reader) : Bytes?
-      return if peek_null(reader)
-      start = reader.pos
-      map_count, map_end = Codec.read_map_header(reader)
-      reader.pos = map_end
-      Codec.slice_from(reader, start) unless map_count.zero?
     end
 
     # Returns the number of bytes written.

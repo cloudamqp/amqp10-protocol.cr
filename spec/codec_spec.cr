@@ -197,3 +197,30 @@ describe AMQP10::Protocol::Codec do
     end
   end
 end
+
+describe AMQP10::Protocol::Codec do
+  it "reads an optional map as a view into the buffer" do
+    io = IO::Memory.new
+    AMQP10::Protocol::Codec.write_value(io, AMQP10::Protocol::Value.map([{AMQP10::Protocol::Value.symbol("k"), AMQP10::Protocol::Value.int(1_i64)}]))
+    io.write_byte 0x41_u8 # the value after the map
+    reader = IO::Memory.new(io.to_slice)
+
+    map = AMQP10::Protocol::Codec.read_optional_map(reader).should_not be_nil
+
+    map.should eq io.to_slice[0, io.size - 1]
+    map.to_unsafe.should eq io.to_slice.to_unsafe
+    reader.pos.should eq io.size - 1
+
+    reader = IO::Memory.new(Bytes[0x40_u8, 0x41_u8]) # null
+    AMQP10::Protocol::Codec.read_optional_map(reader).should be_nil
+    reader.pos.should eq 1
+
+    reader = IO::Memory.new(Bytes[0xc1_u8, 0x01_u8, 0x00_u8, 0x41_u8]) # empty map8
+    AMQP10::Protocol::Codec.read_optional_map(reader).should be_nil
+    reader.pos.should eq 3
+
+    expect_raises(AMQP10::Protocol::DecodeError, "expected map") do
+      AMQP10::Protocol::Codec.read_optional_map(IO::Memory.new(Bytes[0x41_u8]))
+    end
+  end
+end
