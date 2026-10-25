@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Codec.read_optional_map` and `Codec.skip_null?` for reading an encoded map as a view into the buffer, as the disposition decoder does for a modified outcome's annotations
 - `TransferCodec::DispositionView` exposes the fields of a modified outcome: `delivery_failed`, `undeliverable_here` and `message_annotations`
 - `Descriptor::AMQP_SEQUENCE` for the amqp-sequence body section
+- Transactions (part 4 of the spec): `Coordinator` target, read into `Attach#coordinator`; `TransferView#txn_id` and `DispositionView#txn_id` from a `transactional-state`, whose outcome a disposition reports as its own; `TransferCodec.write_disposition` takes a `txn_id` to wrap the outcome in a `transactional-state` and an `error` for a rejected outcome; `TransferCodec.write_declared`; descriptors and `amqp:transaction:*` error conditions
 
 ### Fixed
 

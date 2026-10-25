@@ -582,6 +582,11 @@ module AMQP10::Protocol
       "amqp:rejected:list"              => Descriptor::REJECTED,
       "amqp:released:list"              => Descriptor::RELEASED,
       "amqp:modified:list"              => Descriptor::MODIFIED,
+      "amqp:coordinator:list"           => Descriptor::COORDINATOR,
+      "amqp:declare:list"               => Descriptor::DECLARE,
+      "amqp:discharge:list"             => Descriptor::DISCHARGE,
+      "amqp:declared:list"              => Descriptor::DECLARED,
+      "amqp:transactional-state:list"   => Descriptor::TRANSACTIONAL_STATE,
     }
 
     def read_descriptor_code(reader : IO::Memory) : UInt64

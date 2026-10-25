@@ -66,6 +66,32 @@ describe AMQP10::Protocol::Target do
   end
 end
 
+describe AMQP10::Protocol::Coordinator do
+  it "encodes the same bytes directly as through its Value form" do
+    [[] of String, ["amqp:local-transactions"], ["amqp:local-transactions", "amqp:multi-txns-per-ssn"]].each do |caps|
+      coordinator = AMQP10::Protocol::Coordinator.new(caps)
+      direct = IO::Memory.new
+      coordinator.write_to(direct)
+      direct.size.should eq coordinator.encoded_size
+      via_value = IO::Memory.new
+      AMQP10::Protocol::Codec.write_value(via_value, coordinator.to_value)
+      direct.to_slice.should eq via_value.to_slice
+      AMQP10::Protocol::Coordinator.from_value(AMQP10::Protocol::Codec.decode(IO::Memory.new(direct.to_slice)))
+        .should eq coordinator
+    end
+  end
+
+  it "reads capabilities given as a single symbol or under the symbolic descriptor" do
+    value = AMQP10::Protocol::Value.described(AMQP10::Protocol::Value.symbol("amqp:coordinator:list"),
+      AMQP10::Protocol::Value.list([AMQP10::Protocol::Value.symbol("amqp:local-transactions")]))
+    AMQP10::Protocol::Coordinator.from_value(value).should_not(be_nil).capabilities.should eq ["amqp:local-transactions"]
+  end
+
+  it "is not read from a target" do
+    AMQP10::Protocol::Coordinator.from_value(AMQP10::Protocol::Target.new("/queues/q").to_value).should be_nil
+  end
+end
+
 describe AMQP10::Protocol::ErrorInfo do
   it "encodes the same bytes directly as through its Value form" do
     [AMQP10::Protocol::ErrorInfo.new(AMQP10::Protocol::ErrorCondition::NOT_FOUND),
@@ -105,6 +131,23 @@ describe AMQP10::Protocol::Attach do
     attach.source.not_nil!.address.should eq "/queues/q"
     attach.target.should be_nil
     attach.initial_delivery_count.should eq 9_u32
+  end
+
+  it "decodes a coordinator target" do
+    fields = [
+      AMQP10::Protocol::Value.string("txn"),
+      AMQP10::Protocol::Value.uint(0_u32),
+      AMQP10::Protocol::Value.bool(false),
+      AMQP10::Protocol::Value.null,
+      AMQP10::Protocol::Value.null,
+      AMQP10::Protocol::Source.new(nil).to_value,
+      AMQP10::Protocol::Coordinator.new(["amqp:local-transactions"]).to_value,
+    ]
+    value = AMQP10::Protocol::Value.described(AMQP10::Protocol::Value.ulong(AMQP10::Protocol::Descriptor::ATTACH),
+      AMQP10::Protocol::Value.list(fields))
+    attach = AMQP10::Protocol::Attach.from_value(value)
+    attach.target.should be_nil
+    attach.coordinator.should_not(be_nil).capabilities.should eq ["amqp:local-transactions"]
   end
 
   it "requires name and handle" do

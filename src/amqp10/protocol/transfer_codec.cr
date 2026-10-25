@@ -16,7 +16,10 @@ module AMQP10::Protocol
       message_format : UInt32?,
       settled : Bool,
       more : Bool,
-      aborted : Bool
+      aborted : Bool,
+      # The txn-id of a transactional-state (4.5.5) in the state field, a view
+      # into the frame buffer: the delivery is part of that transaction.
+      txn_id : Bytes? = nil
 
     # For a modified outcome, delivery_failed, undeliverable_here and
     # message_annotations carry its fields; message_annotations is the
@@ -31,7 +34,10 @@ module AMQP10::Protocol
       state_present : Bool,
       delivery_failed : Bool = false,
       undeliverable_here : Bool = false,
-      message_annotations : Bytes? = nil
+      message_annotations : Bytes? = nil,
+      # Set when the state is a transactional-state (4.5.5), whose outcome is
+      # then `outcome`; a view into the frame buffer.
+      txn_id : Bytes? = nil
 
     # ameba:disable Metrics/CyclomaticComplexity
     def read_transfer(reader : IO::Memory) : TransferView
@@ -45,6 +51,7 @@ module AMQP10::Protocol
       settled = false
       more = false
       aborted = false
+      txn_id = nil
 
       index = 0
       while index < count
@@ -61,6 +68,8 @@ module AMQP10::Protocol
           settled = read_optional_bool(reader) || false
         when 5
           more = read_optional_bool(reader) || false
+        when 7
+          txn_id = read_transfer_txn_id(reader)
         when 9
           aborted = read_optional_bool(reader) || false
         else
@@ -71,7 +80,7 @@ module AMQP10::Protocol
       reader.skip(end_pos - reader.pos) if reader.pos < end_pos
       handle_value = handle
       raise DecodeError.new("transfer missing handle") unless handle_value
-      TransferView.new(handle_value, delivery_id, delivery_tag, message_format, settled, more, aborted)
+      TransferView.new(handle_value, delivery_id, delivery_tag, message_format, settled, more, aborted, txn_id)
     rescue ex : IO::EOFError
       raise DecodeError.new("truncated AMQP 1.0 transfer", cause: ex)
     end
@@ -88,6 +97,7 @@ module AMQP10::Protocol
       outcome = nil
       state_present = false
       modified = nil
+      txn_id = nil
 
       index = 0
       while index < count
@@ -101,7 +111,7 @@ module AMQP10::Protocol
         when 3
           settled = read_optional_bool(reader) || false
         when 4
-          state_present, outcome, modified = read_state(reader)
+          state_present, outcome, modified, txn_id = read_state(reader)
         else
           Codec.skip_value(reader)
         end
@@ -113,9 +123,9 @@ module AMQP10::Protocol
       raise DecodeError.new("disposition missing role") unless role_value
       raise DecodeError.new("disposition missing first") unless first_value
       if modified
-        DispositionView.new(role_value, first_value, last, settled, outcome, state_present, *modified)
+        DispositionView.new(role_value, first_value, last, settled, outcome, state_present, *modified, txn_id: txn_id)
       else
-        DispositionView.new(role_value, first_value, last, settled, outcome, state_present)
+        DispositionView.new(role_value, first_value, last, settled, outcome, state_present, txn_id: txn_id)
       end
     rescue ex : IO::EOFError
       raise DecodeError.new("truncated AMQP 1.0 disposition", cause: ex)
@@ -183,18 +193,73 @@ module AMQP10::Protocol
     # and, if it was a recognized terminal outcome, which one. A non-terminal
     # state (e.g. received) reports present=true with a nil outcome so the
     # caller does not mistake it for acceptance.
-    private def read_state(reader) : Tuple(Bool, Outcome?, Tuple(Bool, Bool, Bytes?)?)
-      return {false, nil, nil} if Codec.skip_null?(reader)
+    # A transactional-state is unwrapped: its outcome is returned as the
+    # outcome, along with its txn-id.
+    private def read_state(reader) : Tuple(Bool, Outcome?, Tuple(Bool, Bool, Bytes?)?, Bytes?)
+      return {false, nil, nil, nil} if Codec.skip_null?(reader)
       descriptor = Codec.read_descriptor_code(reader)
+      if descriptor == Descriptor::TRANSACTIONAL_STATE
+        return read_transactional_state(reader)
+      end
+      outcome, modified = read_outcome(reader, descriptor)
+      {true, outcome, modified, nil}
+    end
+
+    # Reads the value of an outcome whose descriptor is read.
+    private def read_outcome(reader, descriptor : UInt64) : Tuple(Outcome?, Tuple(Bool, Bool, Bytes?)?)
       outcome = case descriptor
                 when Descriptor::ACCEPTED then Outcome::Accepted
                 when Descriptor::RELEASED then Outcome::Released
                 when Descriptor::REJECTED then Outcome::Rejected
                 when Descriptor::MODIFIED then Outcome::Modified
                 end
-      return {true, outcome, read_modified(reader)} if outcome.try(&.modified?)
+      return {outcome, read_modified(reader)} if outcome.try(&.modified?)
       Codec.skip_value(reader)
-      {true, outcome, nil}
+      {outcome, nil}
+    end
+
+    # The fields of a transactional-state: txn-id and outcome. Without an
+    # outcome the state is present but not terminal.
+    private def read_transactional_state(reader) : Tuple(Bool, Outcome?, Tuple(Bool, Bool, Bytes?)?, Bytes?)
+      txn_id = nil
+      outcome = nil
+      modified = nil
+      count, end_pos = Codec.read_list_header(reader)
+      index = 0
+      while index < count
+        case index
+        when 0 then txn_id = read_optional_binary(reader)
+        when 1
+          unless Codec.skip_null?(reader)
+            outcome, modified = read_outcome(reader, Codec.read_descriptor_code(reader))
+          end
+        else Codec.skip_value(reader)
+        end
+        index += 1
+      end
+      reader.skip(end_pos - reader.pos) if reader.pos < end_pos
+      {true, outcome, modified, txn_id}
+    end
+
+    # The txn-id of a transfer's state, when it is a transactional-state; any
+    # other state is skipped.
+    private def read_transfer_txn_id(reader) : Bytes?
+      return if Codec.skip_null?(reader)
+      start = reader.pos
+      if reader.peek[0]? == 0x00_u8
+        descriptor = begin
+          Codec.read_descriptor_code(reader)
+        rescue DecodeError
+          nil # a symbolic descriptor we have no code for
+        end
+        if descriptor == Descriptor::TRANSACTIONAL_STATE
+          _, _, _, txn_id = read_transactional_state(reader)
+          return txn_id
+        end
+      end
+      reader.pos = start
+      Codec.skip_value(reader)
+      nil
     end
 
     # The fields of a modified outcome: delivery-failed, undeliverable-here
@@ -219,9 +284,16 @@ module AMQP10::Protocol
     end
 
     # Returns the number of bytes written.
+    # With a txn_id the outcome is wrapped in a transactional-state (4.5.5);
+    # an error is written as a rejected outcome's error.
     def write_disposition(io : IO, channel : UInt16, first : UInt32, outcome : Outcome, settled = true,
-                          role : Role = Role::Receiver, last : UInt32? = nil) : UInt64
-      state_size = outcome_size(outcome)
+                          role : Role = Role::Receiver, last : UInt32? = nil,
+                          txn_id : Bytes? = nil, error : ErrorInfo? = nil) : UInt64
+      state_size = outcome_size(outcome, error)
+      if txn_id
+        txn_fields_size = Codec.binary_size(txn_id) + state_size
+        state_size = 3 + Codec.list_header_size(txn_fields_size) + txn_fields_size
+      end
       last_size = last ? Codec.uint_size(last) : 1
       fields_size = 1 + Codec.uint_size(first) + last_size + 1 + state_size
       frame_size = 8 + 3 + Codec.list_header_size(fields_size) + fields_size
@@ -236,7 +308,13 @@ module AMQP10::Protocol
         io.write_byte 0x40_u8
       end
       io.write_byte(settled ? 0x41_u8 : 0x42_u8)
-      write_outcome(io, outcome)
+      if txn_id
+        txn_fields_size = Codec.binary_size(txn_id) + outcome_size(outcome, error)
+        Codec.write_descriptor(io, Descriptor::TRANSACTIONAL_STATE)
+        Codec.write_list_header(io, txn_fields_size, 2)
+        Codec.write_binary(io, txn_id)
+      end
+      write_outcome(io, outcome, error)
       io.flush
       frame_size.to_u64
     end
@@ -323,14 +401,48 @@ module AMQP10::Protocol
       3 + Codec.list_header_size(fields_size) + fields_size
     end
 
-    # Every outcome we emit is a descriptor followed by an empty list (list0).
-    OUTCOME_SIZE = 3 + 1
-
-    private def outcome_size(outcome : Outcome) : Int32
-      OUTCOME_SIZE
+    # A disposition whose state is declared{txn-id} (4.5.3), the answer to a
+    # declare sent to a coordinator.
+    def write_declared(io : IO, channel : UInt16, first : UInt32, txn_id : Bytes, settled = true) : UInt64
+      declared_fields_size = Codec.binary_size(txn_id)
+      state_size = 3 + Codec.list_header_size(declared_fields_size) + declared_fields_size
+      fields_size = 1 + Codec.uint_size(first) + 1 + 1 + state_size
+      frame_size = 8 + 3 + Codec.list_header_size(fields_size) + fields_size
+      FrameWriter.write_frame_header(io, frame_size.to_u32, AMQP_FRAME_TYPE, channel)
+      Codec.write_descriptor(io, Descriptor::DISPOSITION)
+      Codec.write_list_header(io, fields_size, 5)
+      io.write_byte 0x41_u8 # role: receiver
+      Codec.write_uint(io, first)
+      io.write_byte 0x40_u8 # last: null
+      io.write_byte(settled ? 0x41_u8 : 0x42_u8)
+      Codec.write_descriptor(io, Descriptor::DECLARED)
+      Codec.write_list_header(io, declared_fields_size, 1)
+      Codec.write_binary(io, txn_id)
+      io.flush
+      frame_size.to_u64
     end
 
-    private def write_outcome(io, outcome : Outcome) : Nil
+    # Every outcome we emit is a descriptor followed by an empty list (list0),
+    # but for a rejected outcome with an error.
+    OUTCOME_SIZE = 3 + 1
+
+    private def outcome_size(outcome : Outcome, error : ErrorInfo? = nil) : Int32
+      if error && outcome.rejected?
+        error_size = error.encoded_size
+        3 + Codec.list_header_size(error_size) + error_size
+      else
+        OUTCOME_SIZE
+      end
+    end
+
+    private def write_outcome(io, outcome : Outcome, error : ErrorInfo? = nil) : Nil
+      if error && outcome.rejected?
+        error_size = error.encoded_size
+        Codec.write_descriptor(io, Descriptor::REJECTED)
+        Codec.write_list_header(io, error_size, 1)
+        error.write_to(io)
+        return
+      end
       case outcome
       in .accepted?
         Codec.write_descriptor(io, Descriptor::ACCEPTED)
