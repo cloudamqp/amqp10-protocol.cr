@@ -23,6 +23,12 @@ module AMQP10::Protocol
     RELEASED = 0x26_u64
     MODIFIED = 0x27_u64
 
+    COORDINATOR         = 0x30_u64
+    DECLARE             = 0x31_u64
+    DISCHARGE           = 0x32_u64
+    DECLARED            = 0x33_u64
+    TRANSACTIONAL_STATE = 0x34_u64
+
     HEADER                 = 0x70_u64
     DELIVERY_ANNOTATIONS   = 0x71_u64
     MESSAGE_ANNOTATIONS    = 0x72_u64
@@ -47,6 +53,8 @@ module AMQP10::Protocol
     RESOURCE_DELETED        = "amqp:resource-deleted"
     PRECONDITION_FAILED     = "amqp:precondition-failed"
     ILLEGAL_STATE           = "amqp:illegal-state"
+    TRANSACTION_UNKNOWN_ID  = "amqp:transaction:unknown-id"
+    TRANSACTION_ROLLBACK    = "amqp:transaction:rollback"
   end
 
   enum Role

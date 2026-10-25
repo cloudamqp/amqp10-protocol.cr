@@ -169,6 +169,53 @@ module AMQP10::Protocol
     end
   end
 
+  # The target of a link to a transaction coordinator (4.5.1), attached in
+  # place of a Target to declare and discharge transactions.
+  record Coordinator, capabilities : Array(String) = [] of String do
+    SYMBOLIC_DESCRIPTOR = "amqp:coordinator:list"
+
+    def self.from_value(value : Value?) : Coordinator?
+      return unless value
+      described = value.described? || return
+      descriptor = described.descriptor
+      return unless descriptor.uint? == Descriptor::COORDINATOR || descriptor.symbol? == SYMBOLIC_DESCRIPTOR
+      fields = described.value.list? || Array(Value).new
+      # A multiple field holds either a single value or an array of them
+      caps = fields[0]?
+      capabilities = if list = caps.try(&.list?)
+                       list.compact_map(&.symbol?)
+                     elsif symbol = caps.try(&.symbol?)
+                       [symbol]
+                     else
+                       [] of String
+                     end
+      new(capabilities)
+    end
+
+    def to_value : Value
+      fields = [Value.array(capability_values)]
+      Value.described(Value.ulong(Descriptor::COORDINATOR), Value.list(fields))
+    end
+
+    def encoded_size : Int32
+      3 + Codec.list_header_size(fields_size) + fields_size
+    end
+
+    def write_to(io : IO) : Nil
+      Codec.write_descriptor(io, Descriptor::COORDINATOR)
+      Codec.write_list_header(io, fields_size, 1)
+      Codec.write_array(io, capability_values)
+    end
+
+    private def fields_size : Int32
+      Codec.encoded_size(Value.array(capability_values))
+    end
+
+    private def capability_values : Array(Value)
+      capabilities.map { |capability| Value.symbol(capability) }
+    end
+  end
+
   record Open,
     container_id : String,
     hostname : String?,
@@ -258,7 +305,8 @@ module AMQP10::Protocol
     rcv_settle_mode : UInt8? = nil,
     source : Source? = nil,
     target : Target? = nil,
-    initial_delivery_count : UInt32? = nil do
+    initial_delivery_count : UInt32? = nil,
+    coordinator : Coordinator? = nil do
     def self.from_value(value : Value) : Attach
       described = value.described? || raise DecodeError.new("expected attach")
       raise DecodeError.new("expected attach") unless described.descriptor_code? == Descriptor::ATTACH
@@ -271,8 +319,9 @@ module AMQP10::Protocol
       rcv_settle_mode = fields[4]?.try(&.uint?).try(&.to_u8)
       source = Source.from_value(fields[5]?)
       target = Target.from_value(fields[6]?)
+      coordinator = Coordinator.from_value(fields[6]?)
       initial_delivery_count = fields[9]?.try(&.uint?).try(&.to_u32)
-      new(name, handle, role, snd_settle_mode, rcv_settle_mode, source, target, initial_delivery_count)
+      new(name, handle, role, snd_settle_mode, rcv_settle_mode, source, target, initial_delivery_count, coordinator)
     end
   end
 

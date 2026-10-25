@@ -257,4 +257,109 @@ describe AMQP10::Protocol::TransferCodec do
       disposition.last.should be_nil
     end
   end
+
+  it "reads the txn-id of a transfer in a transaction" do
+    txn_state = AMQP10::Protocol::Value.described(
+      AMQP10::Protocol::Value.ulong(AMQP10::Protocol::Descriptor::TRANSACTIONAL_STATE),
+      AMQP10::Protocol::Value.list([AMQP10::Protocol::Value.binary(Bytes[0, 0, 0, 7])]))
+    received = AMQP10::Protocol::Value.described(
+      AMQP10::Protocol::Value.symbol("amqp:received:list"),
+      AMQP10::Protocol::Value.list([AMQP10::Protocol::Value.uint(0_u32), AMQP10::Protocol::Value.ulong(0_u64)]))
+    {txn_state => Bytes[0, 0, 0, 7], received => nil, AMQP10::Protocol::Value.null => nil}.each do |state, txn_id|
+      fields = [
+        AMQP10::Protocol::Value.uint(1_u32),
+        AMQP10::Protocol::Value.uint(2_u32),
+        AMQP10::Protocol::Value.binary(Bytes[2]),
+        AMQP10::Protocol::Value.uint(0_u32),
+        AMQP10::Protocol::Value.null,
+        AMQP10::Protocol::Value.null,
+        AMQP10::Protocol::Value.null,
+        state,
+        AMQP10::Protocol::Value.null,
+        AMQP10::Protocol::Value.bool(false),
+      ]
+      payload = IO::Memory.new
+      AMQP10::Protocol::Codec.write_described_list(payload, AMQP10::Protocol::Descriptor::TRANSFER, fields)
+
+      transfer = AMQP10::Protocol::TransferCodec.read_transfer(IO::Memory.new(payload.to_slice))
+
+      transfer.txn_id.should eq txn_id
+      transfer.delivery_id.should eq 2_u32
+      transfer.aborted.should be_false
+    end
+  end
+
+  it "unwraps the outcome of a transactional-state in a disposition" do
+    modified = AMQP10::Protocol::Value.described(
+      AMQP10::Protocol::Value.ulong(AMQP10::Protocol::Descriptor::MODIFIED),
+      AMQP10::Protocol::Value.list([AMQP10::Protocol::Value.bool(true)]))
+    {modified => AMQP10::Protocol::Outcome::Modified, AMQP10::Protocol::Value.null => nil}.each do |outcome_value, outcome|
+      txn_state = AMQP10::Protocol::Value.described(
+        AMQP10::Protocol::Value.ulong(AMQP10::Protocol::Descriptor::TRANSACTIONAL_STATE),
+        AMQP10::Protocol::Value.list([AMQP10::Protocol::Value.binary(Bytes[9]), outcome_value]))
+      fields = [
+        AMQP10::Protocol::Value.bool(true),
+        AMQP10::Protocol::Value.uint(5_u32),
+        AMQP10::Protocol::Value.null,
+        AMQP10::Protocol::Value.bool(true),
+        txn_state,
+      ]
+      payload = IO::Memory.new
+      AMQP10::Protocol::Codec.write_described_list(payload, AMQP10::Protocol::Descriptor::DISPOSITION, fields)
+
+      disposition = AMQP10::Protocol::TransferCodec.read_disposition(IO::Memory.new(payload.to_slice))
+
+      disposition.txn_id.should eq Bytes[9]
+      disposition.state_present.should be_true
+      disposition.outcome.should eq outcome
+      disposition.delivery_failed.should eq !outcome.nil?
+    end
+  end
+
+  it "round-trips every outcome through a transactional disposition" do
+    AMQP10::Protocol::Outcome.each do |outcome|
+      io = IO::Memory.new
+      bytes = AMQP10::Protocol::TransferCodec.write_disposition(io, 0_u16, 1_u32, outcome, txn_id: Bytes[1, 2])
+      bytes.should eq io.size
+      disposition = AMQP10::Protocol::TransferCodec.read_disposition(IO::Memory.new(io.to_slice[8, io.size - 8]))
+      disposition.outcome.should eq outcome
+      disposition.txn_id.should eq Bytes[1, 2]
+    end
+  end
+
+  it "writes a rejected outcome with an error" do
+    error = AMQP10::Protocol::ErrorInfo.new(AMQP10::Protocol::ErrorCondition::TRANSACTION_UNKNOWN_ID, "no txn")
+    [nil, Bytes[3]].each do |txn_id|
+      io = IO::Memory.new
+      bytes = AMQP10::Protocol::TransferCodec.write_disposition(io, 0_u16, 1_u32,
+        AMQP10::Protocol::Outcome::Rejected, txn_id: txn_id, error: error)
+      bytes.should eq io.size
+      IO::ByteFormat::NetworkEndian.decode(UInt32, io.to_slice[0, 4]).should eq io.size
+      value = AMQP10::Protocol::Codec.decode(IO::Memory.new(io.to_slice[8, io.size - 8]))
+      state = value.described?.should_not(be_nil).value.list?.should_not(be_nil)[4]
+      if txn_id
+        state.descriptor_code?.should eq AMQP10::Protocol::Descriptor::TRANSACTIONAL_STATE
+        state = state.described?.should_not(be_nil).value.list?.should_not(be_nil)[1]
+      end
+      state.descriptor_code?.should eq AMQP10::Protocol::Descriptor::REJECTED
+      rejected = state.described?.should_not(be_nil).value.list?.should_not(be_nil)
+      rejected[0].descriptor_code?.should eq AMQP10::Protocol::Descriptor::ERROR
+      error_fields = rejected[0].described?.should_not(be_nil).value.list?.should_not(be_nil)
+      error_fields.map(&.string_like?).should eq ["amqp:transaction:unknown-id", "no txn"]
+    end
+  end
+
+  it "writes a declared state" do
+    io = IO::Memory.new
+    bytes = AMQP10::Protocol::TransferCodec.write_declared(io, 2_u16, 4_u32, Bytes[0, 0, 0, 0, 0, 0, 0, 1])
+    bytes.should eq io.size
+    IO::ByteFormat::NetworkEndian.decode(UInt32, io.to_slice[0, 4]).should eq io.size
+    value = AMQP10::Protocol::Codec.decode(IO::Memory.new(io.to_slice[8, io.size - 8]))
+    fields = value.described?.should_not(be_nil).value.list?.should_not(be_nil)
+    fields[1].uint?.should eq 4_u64
+    fields[3].bool?.should be_true
+    fields[4].descriptor_code?.should eq AMQP10::Protocol::Descriptor::DECLARED
+    declared = fields[4].described?.should_not(be_nil).value.list?.should_not(be_nil)
+    declared[0].binary?.should eq Bytes[0, 0, 0, 0, 0, 0, 0, 1]
+  end
 end
