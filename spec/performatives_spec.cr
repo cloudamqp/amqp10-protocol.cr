@@ -38,7 +38,11 @@ describe AMQP10::Protocol::Source do
   it "encodes the same bytes directly as through its Value form" do
     props = AMQP10::Protocol::Value.map([{AMQP10::Protocol::Value.symbol("k"), AMQP10::Protocol::Value.string("v")}])
     [AMQP10::Protocol::Source.new("/queues/q"),
-     AMQP10::Protocol::Source.new(nil, durable: 2_u32, dynamic: true, dynamic_node_properties: props)].each do |source|
+     AMQP10::Protocol::Source.new(nil, durable: 2_u32, dynamic: true, dynamic_node_properties: props),
+     AMQP10::Protocol::Source.new("/exchanges/amq.topic/a", durable: 1_u32, expiry_policy: "never"),
+     AMQP10::Protocol::Source.new("/exchanges/amq.topic/a", capabilities: ["shared", "global"]),
+     AMQP10::Protocol::Source.new(nil, dynamic: true, dynamic_node_properties: props,
+       expiry_policy: "link-detach", capabilities: ["topic"])].each do |source|
       direct = IO::Memory.new
       source.write_to(direct)
       direct.size.should eq source.encoded_size
@@ -50,7 +54,18 @@ describe AMQP10::Protocol::Source do
       decoded.address.should eq source.address
       decoded.durable.should eq source.durable
       decoded.dynamic.should eq source.dynamic
+      decoded.expiry_policy.should eq source.expiry_policy
+      decoded.capabilities.should eq source.capabilities
     end
+  end
+
+  it "reads a single symbol as one capability" do
+    fields = [AMQP10::Protocol::Value.string("/exchanges/x")] +
+             Array.new(9) { AMQP10::Protocol::Value.null } +
+             [AMQP10::Protocol::Value.symbol("topic")]
+    value = AMQP10::Protocol::Value.described(AMQP10::Protocol::Value.ulong(AMQP10::Protocol::Descriptor::SOURCE),
+      AMQP10::Protocol::Value.list(fields))
+    AMQP10::Protocol::Source.from_value(value).not_nil!.capabilities.should eq ["topic"]
   end
 end
 

@@ -37,12 +37,26 @@ module AMQP10::Protocol
     end
   end
 
+  # A multiple field (1.6.11) holds either a single symbol or an array of them
+  # :nodoc:
+  def self.multiple_symbols(value : Value?) : Array(String)
+    if list = value.try(&.list?)
+      list.compact_map(&.symbol?)
+    elsif symbol = value.try(&.symbol?)
+      [symbol]
+    else
+      [] of String
+    end
+  end
+
   record Source,
     address : String?,
     durable : UInt32 = 0_u32,
     dynamic : Bool = false,
     dynamic_node_properties : Value? = nil,
-    filter : Value? = nil do
+    filter : Value? = nil,
+    expiry_policy : String? = nil,
+    capabilities : Array(String) = [] of String do
     def self.from_value(value : Value?) : Source?
       return unless value
       described = value.described? || return
@@ -50,24 +64,30 @@ module AMQP10::Protocol
       fields = described.value.list? || Array(Value).new
       address = fields[0]?.try &.string_like?
       durable = fields[1]?.try(&.uint?).try(&.to_u32) || 0_u32
+      expiry_policy = fields[2]?.try &.symbol?
       dynamic = fields[4]?.try(&.bool?) || false
       dynamic_node_properties = fields[5]?.try { |v| v.null? ? nil : v }
       filter = fields[7]?.try { |v| v.null? ? nil : v }
-      new(address, durable, dynamic, dynamic_node_properties, filter)
+      capabilities = Protocol.multiple_symbols(fields[10]?)
+      new(address, durable, dynamic, dynamic_node_properties, filter, expiry_policy, capabilities)
     end
 
     # Generic Value form, e.g. for building an Attach with
     # FrameWriter.write_performative; write_to and encoded_size below encode it
-    # directly without allocating.
+    # directly without allocating. The filter is not encoded.
     def to_value : Value
-      fields = Array(Value).new(dynamic_node_properties ? 6 : 5)
+      fields = Array(Value).new(field_count)
       fields << (address.try { |a| Value.string(a) } || Value.null)
       fields << (durable.zero? ? Value.null : Value.uint(durable))
-      fields << Value.null
+      fields << (expiry_policy.try { |p| Value.symbol(p) } || Value.null)
       fields << Value.null
       fields << (dynamic ? Value.bool(true) : Value.null)
-      if props = dynamic_node_properties
-        fields << props
+      if field_count > 5
+        fields << (dynamic_node_properties || Value.null)
+      end
+      unless capabilities.empty?
+        4.times { fields << Value.null } # distribution-mode, filter, default-outcome, outcomes
+        fields << Value.array(capability_values)
       end
       Value.described(Value.ulong(Descriptor::SOURCE), Value.list(fields))
     end
@@ -78,29 +98,55 @@ module AMQP10::Protocol
 
     def write_to(io : IO) : Nil
       Codec.write_descriptor(io, Descriptor::SOURCE)
-      Codec.write_list_header(io, fields_size, dynamic_node_properties ? 6 : 5)
+      Codec.write_list_header(io, fields_size, field_count)
       Codec.write_nullable_string(io, address)
       if durable.zero?
         io.write_byte 0x40_u8
       else
         Codec.write_uint(io, durable)
       end
-      io.write_byte 0x40_u8 # expiry-policy: null
+      if policy = expiry_policy
+        Codec.write_symbol(io, policy)
+      else
+        io.write_byte 0x40_u8
+      end
       io.write_byte 0x40_u8 # timeout: null
       io.write_byte(dynamic ? 0x41_u8 : 0x40_u8)
-      if props = dynamic_node_properties
-        Codec.write_value(io, props)
+      if field_count > 5
+        if props = dynamic_node_properties
+          Codec.write_value(io, props)
+        else
+          io.write_byte 0x40_u8
+        end
       end
+      unless capabilities.empty?
+        4.times { io.write_byte 0x40_u8 } # distribution-mode, filter, default-outcome, outcomes
+        Codec.write_array(io, capability_values)
+      end
+    end
+
+    # Trailing null fields are left out
+    private def field_count : Int32
+      return 11 unless capabilities.empty?
+      dynamic_node_properties ? 6 : 5
     end
 
     private def fields_size : Int32
       size = Codec.nullable_string_size(address)
       size += durable.zero? ? 1 : Codec.uint_size(durable)
-      size += 1 + 1 + 1 # expiry-policy, timeout, dynamic
-      if props = dynamic_node_properties
-        size += Codec.encoded_size(props)
+      size += expiry_policy.try { |p| Codec.encoded_size(Value.symbol(p)) } || 1
+      size += 1 + 1 # timeout, dynamic
+      if field_count > 5
+        size += dynamic_node_properties.try { |props| Codec.encoded_size(props) } || 1
+      end
+      unless capabilities.empty?
+        size += 4 + Codec.encoded_size(Value.array(capability_values))
       end
       size
+    end
+
+    private def capability_values : Array(Value)
+      capabilities.map { |capability| Value.symbol(capability) }
     end
   end
 
@@ -180,16 +226,7 @@ module AMQP10::Protocol
       descriptor = described.descriptor
       return unless descriptor.uint? == Descriptor::COORDINATOR || descriptor.symbol? == SYMBOLIC_DESCRIPTOR
       fields = described.value.list? || Array(Value).new
-      # A multiple field holds either a single value or an array of them
-      caps = fields[0]?
-      capabilities = if list = caps.try(&.list?)
-                       list.compact_map(&.symbol?)
-                     elsif symbol = caps.try(&.symbol?)
-                       [symbol]
-                     else
-                       [] of String
-                     end
-      new(capabilities)
+      new(Protocol.multiple_symbols(fields[0]?))
     end
 
     def to_value : Value

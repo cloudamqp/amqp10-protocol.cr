@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TransferCodec::DispositionView` exposes the fields of a modified outcome: `delivery_failed`, `undeliverable_here` and `message_annotations`
 - `Descriptor::AMQP_SEQUENCE` for the amqp-sequence body section
 - Transactions (part 4 of the spec): `Coordinator` target, read into `Attach#coordinator`; `TransferView#txn_id` and `DispositionView#txn_id` from a `transactional-state`, whose outcome a disposition reports as its own; `TransferCodec.write_disposition` takes a `txn_id` to wrap the outcome in a `transactional-state` and an `error` for a rejected outcome; `TransferCodec.write_declared`; descriptors and `amqp:transaction:*` error conditions
+- `Source#expiry_policy` and `Source#capabilities`, read from and written to the source terminus, as clients such as Qpid JMS use them for topic and shared subscriptions
 
 ### Fixed
 
